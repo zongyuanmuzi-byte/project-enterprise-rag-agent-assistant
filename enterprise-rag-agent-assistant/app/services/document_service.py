@@ -1,4 +1,5 @@
 from pathlib import Path
+from io import BytesIO
 import re
 from typing import Any
 
@@ -16,6 +17,126 @@ from app.services.vector_store_service import VectorStoreService
 logger = get_logger(__name__)
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
+
+
+def read_pdf_text_from_bytes(content: bytes, filename: str) -> str:
+    """
+    Extract text from a text-based PDF byte stream.
+    """
+    header = content[:5]
+
+    if header != b"%PDF-":
+        raise ValueError(
+            f"Invalid PDF file: {filename}. "
+            f"Expected file header to start with %PDF-, got {header!r}. "
+            "Please make sure this is a real PDF file, not a renamed text file."
+        )
+
+    try:
+        reader = PdfReader(BytesIO(content))
+    except Exception as exc:
+        logger.exception("Failed to open PDF bytes | filename=%s", filename)
+        raise RuntimeError(
+            f"Failed to open PDF file: {filename}. Error: {str(exc)}"
+        ) from exc
+
+    if not reader.pages:
+        raise ValueError(f"PDF has no pages: {filename}")
+
+    page_texts: list[str] = []
+
+    for page_index, page in enumerate(reader.pages):
+        try:
+            text = page.extract_text() or ""
+        except Exception as exc:
+            logger.warning(
+                "Failed to extract text from PDF page | filename=%s | page_index=%s | error=%s",
+                filename,
+                page_index,
+                str(exc),
+            )
+            text = ""
+
+        if text.strip():
+            page_texts.append(text.strip())
+
+    full_text = "\n\n".join(page_texts).strip()
+
+    if not full_text:
+        raise ValueError(
+            f"No extractable text found in PDF: {filename}. "
+            "This may be a scanned PDF and OCR is not supported at this stage."
+        )
+
+    logger.info(
+        "PDF text extracted successfully | filename=%s | pages=%s | text_length=%s",
+        filename,
+        len(reader.pages),
+        len(full_text),
+    )
+
+    return full_text
+
+
+def read_file_content(
+    filename: str,
+    content: bytes,
+    content_type: str | None = None,
+) -> tuple[str, str]:
+    """
+    Read uploaded .txt, .md, or text-based .pdf content from bytes.
+    """
+    safe_filename = Path(filename).name
+
+    if not safe_filename:
+        raise ValueError("filename cannot be empty.")
+
+    if not content:
+        raise ValueError(f"File content is empty: {safe_filename}")
+
+    file_extension = Path(safe_filename).suffix.lower()
+
+    if file_extension not in SUPPORTED_EXTENSIONS:
+        logger.error("Unsupported file type: %s", file_extension)
+        raise ValueError(
+            f"Unsupported file type: {file_extension}. "
+            "Only .txt, .md, and text-based .pdf files are supported at this stage."
+        )
+
+    try:
+        if file_extension == ".pdf":
+            raw_text = read_pdf_text_from_bytes(content, safe_filename)
+        else:
+            raw_text = content.decode("utf-8")
+
+    except UnicodeDecodeError as exc:
+        logger.exception("Failed to decode uploaded file as UTF-8 | filename=%s", safe_filename)
+        raise RuntimeError(
+            f"Failed to read file as UTF-8. Please check file encoding: {safe_filename}"
+        ) from exc
+
+    except ValueError:
+        raise
+
+    except Exception as exc:
+        logger.exception("Failed to read uploaded file bytes | filename=%s", safe_filename)
+        raise RuntimeError(
+            f"Failed to read uploaded file: {safe_filename}. Error: {str(exc)}"
+        ) from exc
+
+    if not raw_text.strip():
+        logger.error("File content is empty after parsing | filename=%s", safe_filename)
+        raise ValueError(f"File content is empty: {safe_filename}")
+
+    logger.info(
+        "Uploaded file bytes read successfully | filename=%s | file_type=%s | text_length=%s | content_type=%s",
+        safe_filename,
+        file_extension,
+        len(raw_text),
+        content_type,
+    )
+
+    return safe_filename, raw_text
 
 def read_pdf_text(file_path: str) -> str:
     """
@@ -508,3 +629,108 @@ def index_document_for_rag(file_path: str, db: Session) -> dict[str, Any]:
         )
 
         raise   
+
+
+def index_uploaded_document_for_rag(
+    filename: str,
+    content: bytes,
+    storage_path: str,
+    db: Session,
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    """
+    Index an uploaded document from bytes into both SQLite and Chroma.
+
+    This path is used by /documents/upload so cloud storage providers such as
+    COS do not need to provide a local readable file path.
+    """
+    try:
+        filename, raw_text = read_file_content(
+            filename=filename,
+            content=content,
+            content_type=content_type,
+        )
+        cleaned_text = clean_text(raw_text)
+
+        file_extension = Path(filename).suffix.lower()
+
+        document = Document(
+            filename=filename,
+            file_path=storage_path,
+            file_type=file_extension.replace(".", ""),
+        )
+
+        db.add(document)
+        db.flush()
+
+        chunks = split_text(
+            text=cleaned_text,
+            document_id=document.id,
+            filename=filename,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
+
+        chunk_models = []
+
+        for chunk in chunks:
+            chunk_model = Chunk(
+                document_id=document.id,
+                chunk_index=chunk["chunk_index"],
+                content=chunk["content"],
+            )
+            chunk_models.append(chunk_model)
+
+        db.add_all(chunk_models)
+
+        embedding_client = EmbeddingClient()
+        chunk_texts = [chunk["content"] for chunk in chunks]
+        embeddings = embedding_client.embed_texts(chunk_texts)
+
+        vector_store = VectorStoreService()
+        vector_store.add_chunks(
+            chunks=chunks,
+            embeddings=embeddings,
+        )
+
+        db.commit()
+        db.refresh(document)
+
+        logger.info(
+            "Uploaded document indexed for RAG successfully | document_id=%s | filename=%s | storage_path=%s | chunks_count=%s",
+            document.id,
+            filename,
+            storage_path,
+            len(chunks),
+        )
+
+        return {
+            "document_id": document.id,
+            "filename": filename,
+            "chunks_count": len(chunks),
+            "status": "indexed",
+        }
+
+    except SQLAlchemyError as exc:
+        db.rollback()
+
+        logger.exception(
+            "Database error when indexing uploaded document for RAG | filename=%s | storage_path=%s",
+            filename,
+            storage_path,
+        )
+
+        raise RuntimeError(
+            f"Database error when indexing uploaded document for RAG: {str(exc)}"
+        ) from exc
+
+    except Exception:
+        db.rollback()
+
+        logger.exception(
+            "Failed to index uploaded document for RAG | filename=%s | storage_path=%s",
+            filename,
+            storage_path,
+        )
+
+        raise

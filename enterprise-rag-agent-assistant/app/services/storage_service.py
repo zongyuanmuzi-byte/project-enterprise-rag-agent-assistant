@@ -24,10 +24,23 @@ class StorageResult:
 
 class BaseStorageService(ABC):
     @abstractmethod
+    async def save_file(
+        self,
+        filename: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> StorageResult:
+        """
+        Save file bytes and return storage metadata.
+        """
+
     async def save_upload_file(self, file: UploadFile) -> StorageResult:
-        """
-        Save an uploaded file and return storage metadata.
-        """
+        content = await file.read()
+        return await self.save_file(
+            filename=file.filename or "",
+            content=content,
+            content_type=file.content_type,
+        )
 
 
 class LocalStorageService(BaseStorageService):
@@ -35,10 +48,29 @@ class LocalStorageService(BaseStorageService):
         self.upload_dir = Path(upload_dir or settings.upload_dir)
 
     async def save_upload_file(self, file: UploadFile) -> StorageResult:
-        original_filename = sanitize_filename(file.filename or "")
+        """
+        Backward-compatible wrapper around the bytes-based save API.
+        """
+        content = await file.read()
+        return await self.save_file(
+            filename=file.filename or "",
+            content=content,
+            content_type=file.content_type,
+        )
+
+    async def save_file(
+        self,
+        filename: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> StorageResult:
+        original_filename = sanitize_filename(filename)
 
         if not original_filename:
             raise ValueError("filename cannot be empty.")
+
+        if not content:
+            raise ValueError("Uploaded file content is empty.")
 
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -46,15 +78,7 @@ class LocalStorageService(BaseStorageService):
         saved_path = self.upload_dir / saved_filename
 
         try:
-            content = await file.read()
-
-            if not content:
-                raise ValueError("Uploaded file content is empty.")
-
             saved_path.write_bytes(content)
-
-        except ValueError:
-            raise
 
         except Exception as exc:
             logger.exception(
@@ -116,27 +140,43 @@ class COSStorageService(BaseStorageService):
         self.client = CosS3Client(config)
 
     async def save_upload_file(self, file: UploadFile) -> StorageResult:
-        original_filename = sanitize_filename(file.filename or "")
+        """
+        Backward-compatible wrapper around the bytes-based save API.
+        """
+        content = await file.read()
+        return await self.save_file(
+            filename=file.filename or "",
+            content=content,
+            content_type=file.content_type,
+        )
+
+    async def save_file(
+        self,
+        filename: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> StorageResult:
+        original_filename = sanitize_filename(filename)
 
         if not original_filename:
             raise ValueError("filename cannot be empty.")
 
+        if not content:
+            raise ValueError("Uploaded file content is empty.")
+
         object_key = f"{self.prefix}{uuid4().hex}_{original_filename}"
 
         try:
-            content = await file.read()
+            put_object_kwargs = {
+                "Bucket": self.bucket,
+                "Body": content,
+                "Key": object_key,
+            }
 
-            if not content:
-                raise ValueError("Uploaded file content is empty.")
+            if content_type:
+                put_object_kwargs["ContentType"] = content_type
 
-            self.client.put_object(
-                Bucket=self.bucket,
-                Body=content,
-                Key=object_key,
-            )
-
-        except ValueError:
-            raise
+            self.client.put_object(**put_object_kwargs)
 
         except Exception as exc:
             logger.exception(
