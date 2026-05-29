@@ -1,0 +1,44 @@
+[
+  {
+    "id": "rag_refund_cycle",
+    "question": "公司的退款周期是多久？",
+    "expected_tool": "rag_tool",
+    "expected_behavior": "answer_with_sources",
+    "expected_keywords": ["7 个工作日", "3 到 5 个工作日"]
+  },
+  {
+    "id": "rag_customer_service_response",
+    "question": "客服响应时间是多久？",
+    "expected_tool": "rag_tool",
+    "expected_behavior": "answer_with_sources",
+    "expected_keywords": ["24 小时", "4 小时"]
+  },
+  {
+    "id": "rag_ceo_birthday_no_answer",
+    "question": "公司 CEO 的生日是哪天？",
+    "expected_tool": "rag_tool",
+    "expected_behavior": "no_answer",
+    "expected_keywords": []
+  },
+  {
+    "id": "summary_refund_process",
+    "question": "请总结下面这段话：客户退款需要先审核，再由财务处理。",
+    "expected_tool": "summary_tool",
+    "expected_behavior": "no_sources",
+    "expected_keywords": []
+  },
+  {
+    "id": "writing_refund_email",
+    "question": "帮我写一封英文邮件，告诉客户我们已经收到退款申请。",
+    "expected_tool": "writing_tool",
+    "expected_behavior": "no_sources",
+    "expected_keywords": []
+  },
+  {
+    "id": "general_chat_rag_explain",
+    "question": "请用简单的话解释什么是 RAG。",
+    "expected_tool": "general_chat_tool",
+    "expected_behavior": "no_sources",
+    "expected_keywords": []
+  }
+]

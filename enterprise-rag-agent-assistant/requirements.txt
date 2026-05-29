@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+pydantic-settings
+python-dotenv
+chromadb
+openai
+requests
+langgraph
+pypdf
+python-multipart
+cos-python-sdk-v5
+pymysql
